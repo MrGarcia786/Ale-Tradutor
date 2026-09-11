@@ -479,10 +479,12 @@
     return;
   }
 
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
+
   function makeVoiceHandler({ btn, getSttLang, getFrom, getTo, getSpeakLang, sourceEl, resultEl }) {
     const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
+    recognition.continuous = IS_IOS;
+    recognition.interimResults = IS_IOS;
     recognition.maxAlternatives = 1;
 
     let listening = false;
@@ -492,37 +494,63 @@
     btn.addEventListener('click', () => {
       if (stopping) return;
 
-      if (!listening) {
-        // Start a new listening session
-        buffer = '';
-        recognition.lang = getSttLang();
-        sourceEl.textContent = '';
-        resultEl.textContent = '';
-        lockUI(true);
-        btn.classList.add('listening');
-        setStatus('A ouvir… toca outra vez quando terminares');
-        try {
-          recognition.start();
-          listening = true;
-        } catch (e) {
-          lockUI(false);
-          btn.classList.remove('listening');
+      if (IS_IOS) {
+        if (!listening) {
+          buffer = '';
+          recognition.lang = getSttLang();
+          sourceEl.textContent = '';
+          resultEl.textContent = '';
+          lockUI(true);
+          btn.classList.add('listening');
+          setStatus('A ouvir… toca outra vez quando terminares');
+          try {
+            recognition.start();
+            listening = true;
+          } catch (e) {
+            lockUI(false);
+            btn.classList.remove('listening');
+          }
+        } else {
+          stopping = true;
+          setStatus('A terminar…');
+          recognition.stop();
         }
-      } else {
-        // Stop and translate what was captured
-        stopping = true;
-        setStatus('A terminar…');
-        recognition.stop();
+        return;
+      }
+
+      // Android / desktop: single-shot, auto-stops on silence.
+      if (listening) return;
+      listening = true;
+      recognition.lang = getSttLang();
+      sourceEl.textContent = '';
+      resultEl.textContent = '';
+      lockUI(true);
+      btn.classList.add('listening');
+      setStatus('A ouvir…');
+      try {
+        recognition.start();
+      } catch (e) {
+        listening = false;
+        lockUI(false);
+        btn.classList.remove('listening');
       }
     });
 
-    recognition.onresult = (event) => {
+    recognition.onresult = async (event) => {
+      if (!IS_IOS) {
+        const transcript = event.results[0][0].transcript;
+        btn.classList.remove('listening');
+        listening = false;
+        await runTranslation(transcript, getFrom(), getTo(), getSpeakLang(), sourceEl, resultEl);
+        return;
+      }
+
       let finalChunk = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
         if (event.results[i].isFinal) {
           finalChunk += event.results[i][0].transcript + ' ';
         } else {
-          sourceEl.textContent = buffer + ' ' + event.results[i][0].transcript;
+          sourceEl.textContent = (buffer + ' ' + event.results[i][0].transcript).trim();
         }
       }
       if (finalChunk) {
@@ -541,13 +569,23 @@
       } else if (event.error === 'not-allowed' || event.error === 'permission-denied') {
         setStatus('Falta autorização do microfone nas definições do telemóvel.', true);
       } else if (event.error === 'aborted') {
-        // Happens on manual stop() in some browsers — not a real error.
+        // Happens on manual stop() — not a real error.
       } else {
         setStatus('Algo falhou. Toca outra vez.', true);
       }
     };
 
     recognition.onend = async () => {
+      if (!IS_IOS) {
+        // Single-shot mode: onresult already handled everything,
+        // or nothing was heard — either way just release the UI.
+        listening = false;
+        btn.classList.remove('listening');
+        if (!stopping) lockUI(false);
+        stopping = false;
+        return;
+      }
+
       const wasListening = listening;
       listening = false;
       stopping = false;
